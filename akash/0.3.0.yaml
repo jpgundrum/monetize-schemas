@@ -71,7 +71,7 @@ phases:
         mode: both
         kind: command
         sudo: required
-        command: apt-get update && apt-get install -y git curl jq yq unzip python3.12 python3.12-venv python3-pip ansible dnsutils && snap install grpcurl
+        command: apt-get update && apt-get install -y git curl jq yq unzip python3.12 python3.12-venv python3-pip ansible dnsutils && curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.2/grpcurl_1.9.2_linux_x86_64.tar.gz | tar -xz -C /usr/local/bin grpcurl
         idempotency: { rerun: safe }
       - id: clone-playbooks
         title: Clone Akash Provider Playbooks
