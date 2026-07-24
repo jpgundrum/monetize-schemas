@@ -1,0 +1,272 @@
+apiVersion: node-provider.peaq.network/v1alpha1
+kind: ProviderProvisioningManifest
+
+metadata:
+  provider: akash
+  displayName: Akash Compute Provider
+  category: compute
+  version: "0.3.0"
+  docs: https://akash.network/docs/providers/getting-started/
+
+execution:
+  supportedModes: [manual, auto]
+  defaultMode: manual
+  runner: { shell: bash, workingDirectory: /root/provider-playbooks, requiresLocalAgent: true }
+  sudo:
+    autoModeRequiresGrant: true
+    grantPrompt: Allow the SDK to install packages, clone provider playbooks, configure Kubernetes, install Akash provider services, and run verification commands.
+    allowedCommands:
+      - { prefix: apt-get }
+      - { prefix: git }
+      - { prefix: ssh-keygen }
+      - { prefix: ansible-playbook }
+      - { prefix: kubectl }
+      - { prefix: provider-services }
+      - { prefix: systemctl }
+
+inputs:
+  - { key: providerDomain, label: Provider domain, type: hostname, required: true, secret: false }
+  - { key: organizationName, label: Organization name, type: string, required: true, secret: false }
+  - { key: organizationEmail, label: Organization email, type: string, required: true, secret: false }
+  - { key: organizationWebsite, label: Organization website, type: url, required: false, secret: false }
+  - { key: locationRegion, label: Location region, type: string, required: true, secret: false, help: "Example: na-us-west" }
+  - { key: clusterMode, label: Kubernetes setup mode, type: enum, required: true, default: k3s, validation: { values: [k3s, kubespray] }, secret: false }
+  - { key: nodeInventory, label: Node inventory, type: array, required: true, secret: true, help: Nodes, IPs, SSH users, SSH ports, and roles. }
+  - { key: enableGpu, label: Enable GPU support, type: bool, required: false, default: false, secret: false }
+  - { key: enablePersistentStorage, label: Enable Rook-Ceph persistent storage, type: bool, required: false, default: false, secret: false }
+  - { key: enableIpLeases, label: Enable IP leases, type: bool, required: false, default: false, secret: false }
+  - { key: walletMode, label: Wallet setup mode, type: enum, required: true, default: generate, validation: { values: [generate, import-key-file, import-mnemonic] }, secret: false }
+  - { key: walletSecret, label: Wallet import secret, type: string, required: false, secret: true }
+  - { key: walletPassword, label: Wallet password, type: string, required: true, secret: true }
+  - { key: pricingProfile, label: Pricing profile, type: object, required: true, secret: false }
+
+preflight:
+  checks:
+    - id: linux
+      description: Confirm Linux host.
+      command: uname -s
+      sudo: never
+      expect: { exitCode: 0, stdoutContains: Linux }
+      onFailure: block
+    - id: x86-64
+      description: Confirm x86_64 architecture.
+      command: uname -m
+      sudo: never
+      expect: { exitCode: 0, stdoutContains: x86_64 }
+      onFailure: block
+    - id: dns-preview
+      description: Show DNS target for owner confirmation.
+      command: "printf 'public_ip=' && curl -s ifconfig.me && printf '\\ndns=' && dig +short {{ inputs.providerDomain }}"
+      sudo: never
+      expect: { exitCode: 0 }
+      onFailure: warn
+
+phases:
+  - id: host-prereqs
+    title: Install host prerequisites
+    description: Install packages needed to run Akash Provider Playbook and verification commands.
+    steps:
+      - id: apt-prereqs
+        title: Install base packages
+        mode: both
+        kind: command
+        sudo: required
+        command: apt-get update && apt-get install -y git curl jq yq unzip python3.12 python3.12-venv python3-pip ansible dnsutils grpcurl
+        idempotency: { rerun: safe }
+      - id: clone-playbooks
+        title: Clone Akash Provider Playbooks
+        mode: both
+        kind: command
+        sudo: required
+        command: test -d /root/provider-playbooks/.git || git clone https://github.com/akash-network/provider-playbooks.git /root/provider-playbooks
+        idempotency: { rerun: safe }
+
+  - id: inventory-and-wallet
+    title: Prepare inventory and wallet
+    description: Render the node inventory and create or import the provider wallet.
+    steps:
+      - id: render-inventory
+        title: Render Ansible inventory
+        mode: both
+        kind: render-file
+        sudo: required
+        file:
+          path: /root/provider-playbooks/inventory/akash/inventory.ini
+          owner: root
+          mode: "0600"
+          content: |
+            # Rendered by peaqOS SDK from inputs.nodeInventory.
+            # The SDK adapter expands node IPs, SSH users, ports, and roles here.
+            {{ render.akashInventory(inputs.nodeInventory) }}
+        produces:
+          - { key: ansibleInventory, path: /root/provider-playbooks/inventory/akash/inventory.ini, description: Akash Ansible inventory, secret: true }
+      - id: render-host-vars
+        title: Render provider variables
+        mode: both
+        kind: render-file
+        sudo: required
+        file:
+          path: /root/provider-playbooks/host_vars/node1.yml
+          owner: root
+          mode: "0600"
+          content: |
+            provider_domain: "{{ inputs.providerDomain }}"
+            organization_name: "{{ inputs.organizationName }}"
+            organization_email: "{{ inputs.organizationEmail }}"
+            organization_website: "{{ inputs.organizationWebsite }}"
+            location_region: "{{ inputs.locationRegion }}"
+            enable_gpu: {{ inputs.enableGpu }}
+            enable_persistent_storage: {{ inputs.enablePersistentStorage }}
+            enable_ip_leases: {{ inputs.enableIpLeases }}
+            pricing_profile: {{ inputs.pricingProfile }}
+        produces:
+          - { key: providerHostVars, path: /root/provider-playbooks/host_vars/node1.yml, description: Provider playbook variables, secret: true }
+      - id: generate-wallet
+        title: Generate provider wallet
+        mode: both
+        kind: command
+        sudo: required
+        command: test "{{ inputs.walletMode }}" != "generate" || provider-services keys add provider --keyring-backend file
+        prompts:
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+          - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+        captures:
+          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
+        produces:
+          - { key: providerWallet, path: /root/.akash/keyring-file, description: Provider wallet keyring, secret: true }
+        redaction: ["{{ inputs.walletPassword }}"]
+      - id: import-wallet
+        title: Import provider wallet
+        mode: both
+        kind: command
+        sudo: required
+        command: test "{{ inputs.walletMode }}" = "generate" || provider-services keys add provider --recover --keyring-backend file
+        prompts:
+          - { name: mnemonic-or-key, question: Enter wallet recovery secret, responseFrom: input, valueRef: walletSecret, secret: true }
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+          - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+        captures:
+          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
+        redaction: ["{{ inputs.walletSecret }}", "{{ inputs.walletPassword }}"]
+      - id: fund-wallet
+        title: Fund provider wallet
+        mode: both
+        kind: owner-action
+        sudo: never
+        ownerAction:
+          instructions: Fund {{ captures.providerAddress }} with enough AKT for gas, bid deposits, and provider operation before continuing.
+          expectedConfirmation: Owner confirms the AKT wallet is funded.
+
+  - id: install-provider
+    title: Install Kubernetes and Akash provider
+    description: Run the selected Provider Playbook path. This is the main tedious setup the SDK hides.
+    steps:
+      - id: setup-ssh-access
+        title: Prepare SSH access to cluster nodes
+        mode: both
+        kind: command
+        sudo: required
+        command: test -f /root/.ssh/id_rsa || ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa
+        idempotency: { rerun: safe }
+      - id: distribute-ssh-key
+        title: Confirm SSH access to all nodes
+        mode: manual
+        kind: owner-action
+        sudo: never
+        ownerAction:
+          instructions: Ensure the root SSH public key from /root/.ssh/id_rsa.pub can access each node in inputs.nodeInventory. The SDK can show per-node ssh-copy-id commands in manual mode.
+          expectedConfirmation: Owner confirms SSH access works for all nodes.
+      - id: run-playbook
+        title: Run Akash Provider Playbook
+        mode: both
+        kind: command
+        sudo: required
+        cwd: /root/provider-playbooks
+        command: 'ansible-playbook -i /root/provider-playbooks/inventory/akash/inventory.ini /root/provider-playbooks/playbooks.yml -t os,{{ inputs.clusterMode }},provider{{ inputs.enableGpu ? ",gpu" : "" }}{{ inputs.enablePersistentStorage ? ",rook-ceph" : "" }}{{ inputs.enableIpLeases ? ",ip-leases" : "" }}'
+        timeoutSeconds: 7200
+        produces:
+          - { key: kubeconfig, path: /etc/kubernetes/admin.conf, description: Kubernetes admin config, secret: true }
+        idempotency: { rerun: requires-confirmation }
+
+  - id: register-provider
+    title: Register provider onchain
+    description: Register or update the provider record with host URI and attributes.
+    steps:
+      - id: provider-create
+        title: Create or update Akash provider
+        mode: both
+        kind: command
+        sudo: required
+        command: provider-services tx provider create --from provider --keyring-backend file --host https://{{ inputs.providerDomain }}:8443 --attributes region={{ inputs.locationRegion }},organization={{ inputs.organizationName }} --yes
+        captures:
+          - { key: providerTxHash, source: stdout, pattern: "[A-Fa-f0-9]{32,64}", secret: false }
+        idempotency: { rerun: requires-confirmation }
+
+  - id: verify-provider
+    title: Run provider smoke checks
+    description: Check that Kubernetes, provider status, gRPC, and bid logs are available.
+    steps:
+      - id: kubectl-pods
+        title: Show Akash provider pods
+        mode: both
+        kind: verify
+        sudo: required
+        command: kubectl -n akash-services get pods
+      - id: provider-status
+        title: Check provider status endpoint
+        mode: both
+        kind: verify
+        sudo: never
+        command: curl -k https://{{ inputs.providerDomain }}:8443/status
+      - id: provider-grpc
+        title: Check provider gRPC endpoint
+        mode: both
+        kind: verify
+        sudo: never
+        command: grpcurl -insecure {{ inputs.providerDomain }}:8444 akash.provider.v1.ProviderRPC.GetStatus
+
+verification:
+  probes:
+    - id: provider-pod-running
+      title: Provider pod is running
+      command: kubectl -n akash-services get pods -l app=akash-provider
+      sudo: required
+      expect: { exitCode: 0, stdoutContains: Running }
+    - id: provider-onchain-registration
+      title: Provider is registered onchain
+      command: provider-services query provider get {{ captures.providerAddress }}
+      sudo: required
+      expect: { exitCode: 0 }
+    - id: provider-status-http
+      title: Provider status endpoint works
+      command: curl -k https://{{ inputs.providerDomain }}:8443/status
+      sudo: never
+      expect: { exitCode: 0 }
+    - id: provider-status-grpc
+      title: Provider gRPC status works
+      command: grpcurl -insecure {{ inputs.providerDomain }}:8444 akash.provider.v1.ProviderRPC.GetStatus
+      sudo: never
+      expect: { exitCode: 0 }
+  success:
+    allOf:
+      - provider-pod-running
+      - provider-onchain-registration
+      - provider-status-http
+      - provider-status-grpc
+
+postProvision:
+  operations:
+    - id: view-provider-logs
+      title: Tail Akash provider logs
+      mode: both
+      sudo: required
+      actor: local-agent
+      command: kubectl -n akash-services logs -l app=akash-provider --tail=100 -f
+      redactsSecrets: false
+    - id: check-provider-balance
+      title: Check provider wallet balance
+      mode: both
+      sudo: required
+      actor: local-agent
+      command: provider-services query bank balances {{ captures.providerAddress }}
+      redactsSecrets: false
