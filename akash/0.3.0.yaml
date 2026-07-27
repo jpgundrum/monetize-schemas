@@ -23,22 +23,29 @@ execution:
       - { prefix: kubectl }
       - { prefix: provider-services }
       - { prefix: systemctl }
+      - { prefix: command }
+      - { prefix: curl }
+      - { prefix: base64 }
+      - { prefix: printf }
 
 inputs:
-  - { key: providerDomain, label: Provider domain, type: hostname, required: true, secret: false }
+  - { key: providerDomain, label: Provider domain, type: hostname, required: true, secret: false, help: "Public DNS name of this provider. For tests, sslip.io works: <ip-with-dashes>.sslip.io" }
+  - { key: nodePublicIp, label: Node public IP, type: string, required: true, secret: false, help: "The public IPv4 of this host (must exist on a local interface; the playbook verifies this). e.g. 172.238.188.94" }
   - { key: organizationName, label: Organization name, type: string, required: true, secret: false }
   - { key: organizationEmail, label: Organization email, type: string, required: true, secret: false }
   - { key: organizationWebsite, label: Organization website, type: url, required: false, secret: false }
-  - { key: locationRegion, label: Location region, type: string, required: true, secret: false, help: "Example: na-us-west" }
-  - { key: clusterMode, label: Kubernetes setup mode, type: enum, required: true, default: k3s, validation: { values: [k3s, kubespray] }, secret: false }
-  - { key: nodeInventory, label: Node inventory, type: array, required: true, secret: true, help: Nodes, IPs, SSH users, SSH ports, and roles. }
+  - { key: locationRegion, label: Location region, type: string, required: true, secret: false, help: "Example: us-central" }
+  - { key: clusterMode, label: Kubernetes setup mode, type: enum, required: true, default: k3s, validation: { values: [k3s] }, secret: false }
+  - { key: chainId, label: Akash chain ID, type: string, required: true, default: sandbox-2, secret: false, help: "sandbox-2 for the Akash sandbox; akashnet-2 for mainnet" }
+  - { key: rpcNode, label: Akash RPC node, type: url, required: true, default: "https://rpc.sandbox-2.aksh.pw:443", secret: false, help: "Chain RPC endpoint matching chainId. Mainnet: https://rpc.akashnet.net:443" }
+  - { key: withdrawalPeriod, label: Withdrawal period, type: string, required: false, default: "24h", secret: false }
+  - { key: providerHostAttr, label: Provider host attribute, type: string, required: false, default: akash, secret: false }
+  - { key: providerTier, label: Provider tier attribute, type: string, required: false, default: community, secret: false }
   - { key: enableGpu, label: Enable GPU support, type: bool, required: false, default: false, secret: false }
   - { key: enablePersistentStorage, label: Enable Rook-Ceph persistent storage, type: bool, required: false, default: false, secret: false }
   - { key: enableIpLeases, label: Enable IP leases, type: bool, required: false, default: false, secret: false }
-  - { key: walletMode, label: Wallet setup mode, type: enum, required: true, default: generate, validation: { values: [generate, import-key-file, import-mnemonic] }, secret: false }
-  - { key: walletSecret, label: Wallet import secret, type: string, required: false, secret: true }
-  - { key: walletPassword, label: Wallet password, type: string, required: true, secret: true }
-  - { key: pricingProfile, label: Pricing profile, type: object, required: true, secret: false }
+  - { key: walletMode, label: Wallet setup mode, type: enum, required: true, default: generate, validation: { values: [generate] }, secret: false }
+  - { key: walletPassword, label: Wallet password, type: string, required: true, secret: true, help: "MINIMUM 8 CHARACTERS — the file keyring backend hard-rejects shorter passphrases." }
 
 preflight:
   checks:
@@ -54,6 +61,12 @@ preflight:
       sudo: never
       expect: { exitCode: 0, stdoutContains: x86_64 }
       onFailure: block
+    - id: public-ip-present
+      description: Confirm the declared public IP exists on a local interface (the k3s role hard-fails otherwise).
+      command: ip -4 addr | grep -q "{{ inputs.nodePublicIp }}"
+      sudo: never
+      expect: { exitCode: 0 }
+      onFailure: block
     - id: dns-preview
       description: Show DNS target for owner confirmation.
       command: "printf 'public_ip=' && curl -s ifconfig.me && printf '\\ndns=' && dig +short {{ inputs.providerDomain }}"
@@ -64,14 +77,14 @@ preflight:
 phases:
   - id: host-prereqs
     title: Install host prerequisites
-    description: Install packages needed to run Akash Provider Playbook and verification commands.
+    description: Install packages needed to run the Akash Provider Playbook and verification commands.
     steps:
       - id: apt-prereqs
         title: Install base packages
         mode: both
         kind: command
         sudo: required
-        command: apt-get update && apt-get install -y git curl jq yq unzip python3.12 python3.12-venv python3-pip ansible dnsutils && curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.2/grpcurl_1.9.2_linux_x86_64.tar.gz | tar -xz -C /usr/local/bin grpcurl
+        command: apt-get update && apt-get install -y git curl jq yq unzip python3.12 python3.12-venv python3-pip ansible dnsutils python3-kubernetes && curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.2/grpcurl_1.9.2_linux_x86_64.tar.gz | tar -xz -C /usr/local/bin grpcurl
         idempotency: { rerun: safe }
       - id: clone-playbooks
         title: Clone Akash Provider Playbooks
@@ -90,7 +103,7 @@ phases:
 
   - id: inventory-and-wallet
     title: Prepare inventory and wallet
-    description: Render the node inventory and create or import the provider wallet.
+    description: Render the node inventory, create the provider wallet, export its key for the playbook, and render host_vars.
     steps:
       - id: render-inventory
         title: Render Ansible inventory
@@ -98,15 +111,65 @@ phases:
         kind: render-file
         sudo: required
         file:
-          path: /root/provider-playbooks/inventory/akash/inventory.ini
+          path: /root/provider-playbooks/inventory.yml
           owner: root
           mode: "0600"
           content: |
-            # Rendered by peaqOS SDK from inputs.nodeInventory.
-            # The SDK adapter expands node IPs, SSH users, ports, and roles here.
-            {{ render.akashInventory(inputs.nodeInventory) }}
+            all:
+              children:
+                kube_control_plane:
+                  hosts:
+                    node1:
+                      ansible_host: {{ inputs.nodePublicIp }}
+                      ansible_connection: local
+                      ansible_user: root
+                      internal_ip: {{ inputs.nodePublicIp }}
+                kube_node:
+                  hosts:
+                    node1:
+                      ansible_host: {{ inputs.nodePublicIp }}
+                      ansible_connection: local
+                      ansible_user: root
+                      internal_ip: {{ inputs.nodePublicIp }}
+                provider:
+                  hosts:
+                    node1:
+                      ansible_host: {{ inputs.nodePublicIp }}
+                      ansible_connection: local
+                      ansible_user: root
+                      internal_ip: {{ inputs.nodePublicIp }}
         produces:
-          - { key: ansibleInventory, path: /root/provider-playbooks/inventory/akash/inventory.ini, description: Akash Ansible inventory, secret: true }
+          - { key: ansibleInventory, path: /root/provider-playbooks/inventory.yml, description: Akash Ansible inventory, secret: false }
+
+      - id: generate-wallet
+        title: Generate provider wallet
+        mode: both
+        kind: command
+        sudo: required
+        command: provider-services keys add provider --keyring-backend file --keyring-dir /root/.akash
+        prompts:
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+          - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+        captures:
+          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
+        produces:
+          - { key: providerWallet, path: /root/.akash/keyring-file, description: Provider wallet keyring, secret: true }
+        redaction: ["{{ inputs.walletPassword }}"]
+
+      - id: export-provider-key
+        title: Export provider key for the playbook
+        mode: both
+        kind: command
+        sudo: required
+        command: 'provider-services keys export provider --keyring-backend file --keyring-dir /root/.akash 2>/dev/null > /root/.akash/provider-export.pem && test -s /root/.akash/provider-export.pem && base64 -w0 /root/.akash/provider-export.pem > /root/.akash/provider_b64_key && printf "%s" "{{ inputs.walletPassword }}" | base64 -w0 > /root/.akash/provider_b64_keysecret && chmod 0600 /root/.akash/provider-export.pem /root/.akash/provider_b64_key /root/.akash/provider_b64_keysecret'
+        prompts:
+          - { name: export-passphrase, question: Enter passphrase to encrypt the exported key, responseFrom: input, valueRef: walletPassword, secret: true }
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+        produces:
+          - { key: providerB64Key, path: /root/.akash/provider_b64_key, description: Base64 provider key for the playbook, secret: true }
+          - { key: providerB64KeySecret, path: /root/.akash/provider_b64_keysecret, description: Base64 key passphrase for the playbook, secret: true }
+        redaction: ["{{ inputs.walletPassword }}"]
+
       - id: render-host-vars
         title: Render provider variables
         mode: both
@@ -117,43 +180,31 @@ phases:
           owner: root
           mode: "0600"
           content: |
-            provider_domain: "{{ inputs.providerDomain }}"
-            organization_name: "{{ inputs.organizationName }}"
-            organization_email: "{{ inputs.organizationEmail }}"
-            organization_website: "{{ inputs.organizationWebsite }}"
-            location_region: "{{ inputs.locationRegion }}"
-            enable_gpu: {{ inputs.enableGpu }}
-            enable_persistent_storage: {{ inputs.enablePersistentStorage }}
-            enable_ip_leases: {{ inputs.enableIpLeases }}
-            pricing_profile: {{ inputs.pricingProfile }}
+            akash1_address: "{{ captures.providerAddress }}"
+            domain: "{{ inputs.providerDomain }}"
+            node: "{{ inputs.rpcNode }}"
+            withdrawal_period: "{{ inputs.withdrawalPeriod }}"
+            email: "{{ inputs.organizationEmail }}"
+            website: "{{ inputs.organizationWebsite }}"
+            region: "{{ inputs.locationRegion }}"
+            host: "{{ inputs.providerHostAttr }}"
+            tier: "{{ inputs.providerTier }}"
+            organization: "{{ inputs.organizationName }}"
         produces:
-          - { key: providerHostVars, path: /root/provider-playbooks/host_vars/node1.yml, description: Provider playbook variables, secret: true }
-      - id: generate-wallet
-        title: Generate provider wallet
-        mode: both
-        kind: command
-        sudo: required
-        command: test "{{ inputs.walletMode }}" != "generate" || provider-services keys add provider --keyring-backend file
-        prompts:
-          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
-          - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
-        captures:
-          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
-        produces:
-          - { key: providerWallet, path: /root/.akash/keyring-file, description: Provider wallet keyring, secret: true }
-        redaction: ["{{ inputs.walletPassword }}"]
+          - { key: providerHostVars, path: /root/provider-playbooks/host_vars/node1.yml, description: Provider playbook variables, secret: false }
+
       - id: fund-wallet
         title: Fund provider wallet
         mode: both
         kind: owner-action
         sudo: never
         ownerAction:
-          instructions: Fund {{ captures.providerAddress }} with enough AKT for gas, bid deposits, and provider operation before continuing.
+          instructions: "Fund {{ captures.providerAddress }} with enough AKT for gas, bid deposits, and provider operation before continuing. Sandbox: request from the faucet listed in https://raw.githubusercontent.com/akash-network/net/main/{{ inputs.chainId }}/meta.json (sandbox-2: https://faucet.sandbox-2.aksh.pw/ — POST to /faucet with form field 'address'). Verify with: provider-services query bank balances {{ captures.providerAddress }} --node {{ inputs.rpcNode }}"
           expectedConfirmation: Owner confirms the AKT wallet is funded.
 
   - id: install-provider
     title: Install Kubernetes and Akash provider
-    description: Run the selected Provider Playbook path. This is the main tedious setup the SDK hides.
+    description: Run the Provider Playbook. This is the main tedious setup the SDK hides.
     steps:
       - id: setup-ssh-access
         title: Prepare SSH access to cluster nodes
@@ -162,24 +213,16 @@ phases:
         sudo: required
         command: test -f /root/.ssh/id_rsa || ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa
         idempotency: { rerun: safe }
-      - id: distribute-ssh-key
-        title: Confirm SSH access to all nodes
-        mode: manual
-        kind: owner-action
-        sudo: never
-        ownerAction:
-          instructions: Ensure the root SSH public key from /root/.ssh/id_rsa.pub can access each node in inputs.nodeInventory. The SDK can show per-node ssh-copy-id commands in manual mode.
-          expectedConfirmation: Owner confirms SSH access works for all nodes.
       - id: run-playbook
         title: Run Akash Provider Playbook
         mode: both
         kind: command
         sudo: required
         cwd: /root/provider-playbooks
-        command: 'ansible-playbook -i /root/provider-playbooks/inventory/akash/inventory.ini /root/provider-playbooks/playbooks.yml -t os,{{ inputs.clusterMode }},provider{{ inputs.enableGpu ? ",gpu" : "" }}{{ inputs.enablePersistentStorage ? ",rook-ceph" : "" }}{{ inputs.enableIpLeases ? ",ip-leases" : "" }}'
+        command: 'export AKASH_NODE="{{ inputs.rpcNode }}" AKASH_CHAIN_ID="{{ inputs.chainId }}" && ansible-playbook -i /root/provider-playbooks/inventory.yml /root/provider-playbooks/playbooks.yml -t os,k3s,provider -e "provider_b64_key=$(cat /root/.akash/provider_b64_key)" -e "provider_b64_keysecret=$(cat /root/.akash/provider_b64_keysecret)" -e "akash1_address={{ captures.providerAddress }}"'
         timeoutSeconds: 7200
         produces:
-          - { key: kubeconfig, path: /etc/kubernetes/admin.conf, description: Kubernetes admin config, secret: true }
+          - { key: kubeconfig, path: /etc/rancher/k3s/k3s.yaml, description: k3s admin kubeconfig (k3s path, not kubeadm's /etc/kubernetes/admin.conf), secret: true }
         idempotency: { rerun: requires-confirmation }
 
   - id: register-provider
@@ -191,9 +234,12 @@ phases:
         mode: both
         kind: command
         sudo: required
-        command: provider-services tx provider create --from provider --keyring-backend file --host https://{{ inputs.providerDomain }}:8443 --attributes region={{ inputs.locationRegion }},organization={{ inputs.organizationName }} --yes
+        command: provider-services tx provider create /root/provider/provider.yaml --from provider --keyring-backend file --keyring-dir /root/.akash --node {{ inputs.rpcNode }} --chain-id {{ inputs.chainId }} --gas auto --gas-adjustment 1.4 --gas-prices 0.0025uakt --yes
+        prompts:
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
         captures:
           - { key: providerTxHash, source: stdout, pattern: "[A-Fa-f0-9]{32,64}", secret: false }
+        redaction: ["{{ inputs.walletPassword }}"]
         idempotency: { rerun: requires-confirmation }
 
   - id: verify-provider
@@ -228,7 +274,7 @@ verification:
       expect: { exitCode: 0, stdoutContains: Running }
     - id: provider-onchain-registration
       title: Provider is registered onchain
-      command: provider-services query provider get {{ captures.providerAddress }}
+      command: provider-services query provider get {{ captures.providerAddress }} --node {{ inputs.rpcNode }}
       sudo: required
       expect: { exitCode: 0 }
     - id: provider-status-http
@@ -257,10 +303,17 @@ postProvision:
       actor: local-agent
       command: kubectl -n akash-services logs -l app=akash-provider --tail=100 -f
       redactsSecrets: false
+    - id: view-provider-init-logs
+      title: Show provider init-container logs (cert bootstrap failures surface here)
+      mode: both
+      sudo: required
+      actor: local-agent
+      command: kubectl -n akash-services logs akash-provider-0 -c init --tail=100
+      redactsSecrets: false
     - id: check-provider-balance
       title: Check provider wallet balance
       mode: both
       sudo: required
       actor: local-agent
-      command: provider-services query bank balances {{ captures.providerAddress }}
+      command: provider-services query bank balances {{ captures.providerAddress }} --node {{ inputs.rpcNode }}
       redactsSecrets: false
