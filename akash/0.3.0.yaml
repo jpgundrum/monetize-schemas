@@ -142,19 +142,6 @@ phases:
         produces:
           - { key: providerWallet, path: /root/.akash/keyring-file, description: Provider wallet keyring, secret: true }
         redaction: ["{{ inputs.walletPassword }}"]
-      - id: import-wallet
-        title: Import provider wallet
-        mode: both
-        kind: command
-        sudo: required
-        command: test "{{ inputs.walletMode }}" = "generate" || provider-services keys add provider --recover --keyring-backend file
-        prompts:
-          - { name: mnemonic-or-key, question: Enter wallet recovery secret, responseFrom: input, valueRef: walletSecret, secret: true }
-          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
-          - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
-        captures:
-          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
-        redaction: ["{{ inputs.walletSecret }}", "{{ inputs.walletPassword }}"]
       - id: fund-wallet
         title: Fund provider wallet
         mode: both
