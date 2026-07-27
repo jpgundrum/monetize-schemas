@@ -146,23 +146,14 @@ phases:
         mode: both
         kind: command
         sudo: required
-        command: provider-services keys show provider --keyring-backend file --keyring-dir /root/.akash >/dev/null 2>&1 || provider-services keys add provider --keyring-backend file --keyring-dir /root/.akash
+        command: provider-services keys add provider --keyring-backend file --keyring-dir /root/.akash
         prompts:
           - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
           - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+        captures:
+          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
         produces:
           - { key: providerWallet, path: /root/.akash/keyring-file, description: Provider wallet keyring, secret: true }
-        redaction: ["{{ inputs.walletPassword }}"]
-      - id: capture-provider-address
-        title: Capture provider wallet address
-        mode: both
-        kind: command
-        sudo: required
-        command: 'provider-services keys show provider -a --keyring-backend file --keyring-dir /root/.akash 2>&1'
-        prompts:
-          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
-        captures:
-          - { key: providerAddress, source: stdout, pattern: "akash1[a-z0-9]+", secret: false }
         redaction: ["{{ inputs.walletPassword }}"]
 
       - id: export-provider-key
@@ -170,11 +161,14 @@ phases:
         mode: both
         kind: command
         sudo: required
-        command: 'printf "%s\n%s\n" "{{ inputs.walletPassword }}" "{{ inputs.walletPassword }}" | provider-services keys export provider --keyring-backend file --keyring-dir /root/.akash 2>/root/.akash/export.raw; sed -n "/-----BEGIN TENDERMINT PRIVATE KEY-----/,/-----END TENDERMINT PRIVATE KEY-----/p" /root/.akash/export.raw > /root/.akash/provider-export.pem && test -s /root/.akash/provider-export.pem && base64 -w0 /root/.akash/provider-export.pem > /root/.akash/provider_b64_key && printf "%s" "{{ inputs.walletPassword }}" | base64 -w0 > /root/.akash/provider_b64_keysecret && rm -f /root/.akash/export.raw && chmod 0600 /root/.akash/provider-export.pem /root/.akash/provider_b64_key /root/.akash/provider_b64_keysecret'
-        redaction: ["{{ inputs.walletPassword }}"]
+        command: 'provider-services keys export provider --keyring-backend file --keyring-dir /root/.akash 2>/dev/null > /root/.akash/provider-export.pem && test -s /root/.akash/provider-export.pem && base64 -w0 /root/.akash/provider-export.pem > /root/.akash/provider_b64_key && printf "%s" "{{ inputs.walletPassword }}" | base64 -w0 > /root/.akash/provider_b64_keysecret && chmod 0600 /root/.akash/provider-export.pem /root/.akash/provider_b64_key /root/.akash/provider_b64_keysecret'
+        prompts:
+          - { name: export-passphrase, question: Enter passphrase to encrypt the exported key, responseFrom: input, valueRef: walletPassword, secret: true }
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
         produces:
           - { key: providerB64Key, path: /root/.akash/provider_b64_key, description: Base64 provider key for the playbook, secret: true }
           - { key: providerB64KeySecret, path: /root/.akash/provider_b64_keysecret, description: Base64 key passphrase for the playbook, secret: true }
+        redaction: ["{{ inputs.walletPassword }}"]
 
       - id: render-host-vars
         title: Render provider variables
