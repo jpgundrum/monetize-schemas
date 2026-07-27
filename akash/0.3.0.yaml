@@ -80,6 +80,13 @@ phases:
         sudo: required
         command: test -d /root/provider-playbooks/.git || git clone https://github.com/akash-network/provider-playbooks.git /root/provider-playbooks
         idempotency: { rerun: safe }
+      - id: install-provider-services
+        title: Install Akash provider-services binary
+        mode: both
+        kind: command
+        sudo: required
+        command: 'command -v provider-services >/dev/null 2>&1 || { curl -sfL https://raw.githubusercontent.com/akash-network/provider/main/install.sh | bash && install -m 0755 "$HOME/bin/provider-services" /usr/local/bin/provider-services; }'
+        idempotency: { rerun: safe }
 
   - id: inventory-and-wallet
     title: Prepare inventory and wallet
