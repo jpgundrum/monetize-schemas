@@ -150,10 +150,19 @@ phases:
         prompts:
           - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
           - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
-        captures:
-          - { key: providerAddress, source: stdout, pattern: "akash[a-z0-9]+", secret: false }
         produces:
           - { key: providerWallet, path: /root/.akash/keyring-file, description: Provider wallet keyring, secret: true }
+        redaction: ["{{ inputs.walletPassword }}"]
+      - id: capture-provider-address
+        title: Capture provider wallet address
+        mode: both
+        kind: command
+        sudo: required
+        command: 'provider-services keys show provider -a --keyring-backend file --keyring-dir /root/.akash 2>&1'
+        prompts:
+          - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
+        captures:
+          - { key: providerAddress, source: stdout, pattern: "akash1[a-z0-9]+", secret: false }
         redaction: ["{{ inputs.walletPassword }}"]
 
       - id: export-provider-key
