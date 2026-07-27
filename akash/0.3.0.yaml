@@ -30,7 +30,7 @@ execution:
 
 inputs:
   - { key: providerDomain, label: Provider domain, type: hostname, required: true, secret: false, help: "Public DNS name of this provider. For tests, sslip.io works: <ip-with-dashes>.sslip.io" }
-  - { key: nodePublicIp, label: Node public IP, type: string, required: true, secret: false, help: "The public IPv4 of this host (must exist on a local interface; the playbook verifies this). e.g. 172.238.188.94" }
+  - { key: nodePublicIp, label: Node public IP, type: string, required: true, secret: false, help: "The public IPv4 of this host (must exist on a local interface; the playbook verifies this). e.g. 203.0.113.10" }
   - { key: organizationName, label: Organization name, type: string, required: true, secret: false }
   - { key: organizationEmail, label: Organization email, type: string, required: true, secret: false }
   - { key: organizationWebsite, label: Organization website, type: url, required: false, secret: false }
@@ -146,7 +146,7 @@ phases:
         mode: both
         kind: command
         sudo: required
-        command: provider-services keys add provider --keyring-backend file --keyring-dir /root/.akash
+        command: provider-services keys show provider --keyring-backend file --keyring-dir /root/.akash >/dev/null 2>&1 || provider-services keys add provider --keyring-backend file --keyring-dir /root/.akash
         prompts:
           - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
           - { name: confirm-passphrase, question: Re-enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
