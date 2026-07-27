@@ -165,7 +165,7 @@ phases:
           - { key: providerAddress, source: stdout, pattern: "akash1[a-z0-9]+", secret: false }
         redaction: ["{{ inputs.walletPassword }}"]
 
-- id: export-provider-key
+      - id: export-provider-key
         title: Export provider key for the playbook
         mode: both
         kind: command
