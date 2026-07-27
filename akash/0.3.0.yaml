@@ -240,7 +240,7 @@ phases:
         mode: both
         kind: command
         sudo: required
-        command: 'grep -q "^host:" /root/provider/provider.yaml || sed -i "/^from:/a host: \"https://{{ inputs.providerDomain }}:8443\"" /root/provider/provider.yaml; provider-services tx provider create /root/provider/provider.yaml --from provider --keyring-backend file --keyring-dir /root/.akash --node {{ inputs.rpcNode }} --chain-id {{ inputs.chainId }} --gas auto --gas-adjustment 1.4 --gas-prices 0.0025uakt --yes'
+        command: 'grep -q "^host:" /root/provider/provider.yaml || sed -i "/^from:/a host: \"https://{{ inputs.providerDomain }}:8443\"" /root/provider/provider.yaml; if provider-services query provider get {{ captures.providerAddress }} --node {{ inputs.rpcNode }} >/dev/null 2>&1; then ACTION=update; else ACTION=create; fi; provider-services tx provider $ACTION /root/provider/provider.yaml --from provider --keyring-backend file --keyring-dir /root/.akash --node {{ inputs.rpcNode }} --chain-id {{ inputs.chainId }} --gas auto --gas-adjustment 1.4 --gas-prices 0.0025uakt --yes'
         prompts:
           - { name: keyring-passphrase, question: Enter keyring passphrase, responseFrom: input, valueRef: walletPassword, secret: true }
         captures:
