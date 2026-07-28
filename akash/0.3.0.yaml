@@ -231,7 +231,7 @@ phases:
           -t os,k3s,provider
           -e "provider_b64_key=$(cat /root/.akash/provider_b64_key)"
           -e "provider_b64_keysecret=$(cat /root/.akash/provider_b64_keysecret)"
-          -e "akash1_address={{ captures.providerAddress }}"
+          -e "akash1_address={{ captures.providerAddress }}"'
         timeoutSeconds: 7200
         produces:
           - { key: kubeconfig, path: /etc/rancher/k3s/k3s.yaml, description: k3s admin kubeconfig (k3s path, not kubeadm's /etc/kubernetes/admin.conf), secret: true }
@@ -244,8 +244,8 @@ phases:
         sudo: required
         command: >-
           helm -n akash-services upgrade akash-provider akash/provider
-          --reuse-values --set chainid={{ inputs.chainId }} --wait --timeout 10m
-          && kubectl -n akash-services delete pod akash-provider-0 --ignore-not-found
+          --version 18.0.2 --reuse-values --set chainid={{ inputs.chainId }} --wait --timeout 10m
+          && kubectl -n akash-services delete pod akash-provider-0 --ignore-not-found --wait=true
         timeoutSeconds: 900
         idempotency: { rerun: safe }
 
@@ -283,7 +283,7 @@ phases:
         mode: both
         kind: verify
         sudo: required
-        command: kubectl -n akash-services get pods
+        command: kubectl -n akash-services get pods -l app=akash-provider | grep Running
         expect: { exitCode: 0, stdoutContains: Running }
       - id: provider-status
         title: Check provider status endpoint
