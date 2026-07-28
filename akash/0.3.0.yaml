@@ -20,6 +20,7 @@ execution:
       - { prefix: git }
       - { prefix: ssh-keygen }
       - { prefix: ansible-playbook }
+      - { prefix: helm }
       - { prefix: kubectl }
       - { prefix: provider-services }
       - { prefix: systemctl }
@@ -189,7 +190,6 @@ phases:
             akash1_address: "{{ captures.providerAddress }}"
             domain: "{{ inputs.providerDomain }}"
             node: "{{ inputs.rpcNode }}"
-            chainid: "{{ inputs.chainId }}"
             withdrawal_period: "{{ inputs.withdrawalPeriod }}"
             email: "{{ inputs.organizationEmail }}"
             website: "{{ inputs.organizationWebsite }}"
@@ -232,11 +232,30 @@ phases:
           -e "provider_b64_key=$(cat /root/.akash/provider_b64_key)"
           -e "provider_b64_keysecret=$(cat /root/.akash/provider_b64_keysecret)"
           -e "akash1_address={{ captures.providerAddress }}"
-          -e "chainid={{ inputs.chainId }}"'
         timeoutSeconds: 7200
         produces:
           - { key: kubeconfig, path: /etc/rancher/k3s/k3s.yaml, description: k3s admin kubeconfig (k3s path, not kubeadm's /etc/kubernetes/admin.conf), secret: true }
         idempotency: { rerun: requires-confirmation }
+
+      - id: set-provider-chain-id
+        title: Pin provider chart to the target chain id
+        mode: both
+        kind: command
+        sudo: required
+        command: >-
+          helm -n akash-services upgrade akash-provider akash/provider
+          --reuse-values --set chainid={{ inputs.chainId }} --wait --timeout 10m
+          && kubectl -n akash-services delete pod akash-provider-0 --ignore-not-found
+        timeoutSeconds: 900
+        idempotency: { rerun: safe }
+
+      - id: wait-provider-ready
+        title: Wait for the provider pod to become ready
+        mode: both
+        kind: command
+        sudo: required
+        command: kubectl -n akash-services wait --for=condition=ready pod -l app=akash-provider --timeout=900s
+        timeoutSeconds: 960
 
   - id: register-provider
     title: Register provider onchain
@@ -265,6 +284,7 @@ phases:
         kind: verify
         sudo: required
         command: kubectl -n akash-services get pods
+        expect: { exitCode: 0, stdoutContains: Running }
       - id: provider-status
         title: Check provider status endpoint
         mode: both
