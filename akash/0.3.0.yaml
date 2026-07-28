@@ -189,7 +189,7 @@ phases:
             akash1_address: "{{ captures.providerAddress }}"
             domain: "{{ inputs.providerDomain }}"
             node: "{{ inputs.rpcNode }}"
-            chain_id: "{{ inputs.chainId }}"
+            chainid: "{{ inputs.chainId }}"
             withdrawal_period: "{{ inputs.withdrawalPeriod }}"
             email: "{{ inputs.organizationEmail }}"
             website: "{{ inputs.organizationWebsite }}"
@@ -232,7 +232,7 @@ phases:
           -e "provider_b64_key=$(cat /root/.akash/provider_b64_key)"
           -e "provider_b64_keysecret=$(cat /root/.akash/provider_b64_keysecret)"
           -e "akash1_address={{ captures.providerAddress }}"
-          -e "chain_id={{ inputs.chainId }}"'
+          -e "chainid={{ inputs.chainId }}"'
         timeoutSeconds: 7200
         produces:
           - { key: kubeconfig, path: /etc/rancher/k3s/k3s.yaml, description: k3s admin kubeconfig (k3s path, not kubeadm's /etc/kubernetes/admin.conf), secret: true }
